@@ -48,33 +48,24 @@ var Bounds = require('../geometry/Bounds');
      * Find a solution for pair positions.
      * @method solvePosition
      * @param {pair[]} pairs
-     * @param {body[]} bodies
-     * @param {number} timeScale
+     * @param {number} delta
      */
-    Resolver.solvePosition = function(pairs, bodies, timeScale) {
+    Resolver.solvePosition = function(pairs, delta) {
         var i,
-            normalX,
-            normalY,
             pair,
             collision,
             bodyA,
             bodyB,
             normal,
-            separation,
-            penetration,
-            positionImpulseA,
-            positionImpulseB,
+            bodyBtoA,
             contactShare,
-            bodyBtoAX,
-            bodyBtoAY,
             positionImpulse,
-            impulseCoefficient = timeScale * Resolver._positionDampen;
-
-        for (i = 0; i < bodies.length; i++) {
-            var body = bodies[i];
-            body.previousPositionImpulse.x = body.positionImpulse.x;
-            body.previousPositionImpulse.y = body.positionImpulse.y;
-        }
+            timeScale = delta / Common._timeUnit,
+            damping = Common.clamp(Resolver._positionDampen * timeScale, 0, 1),
+            tempA = Vector._temp[0],
+            tempB = Vector._temp[1],
+            tempC = Vector._temp[2],
+            tempD = Vector._temp[3];
 
         // find impulses required to resolve penetration
         for (i = 0; i < pairs.length; i++) {
@@ -88,35 +79,39 @@ var Bounds = require('../geometry/Bounds');
             bodyB = collision.parentB;
             normal = collision.normal;
 
-            positionImpulseA = bodyA.previousPositionImpulse;
-            positionImpulseB = bodyB.previousPositionImpulse;
+            // get current separation between body edges involved in collision
+            bodyBtoA = Vector.sub(Vector.add(bodyB.positionImpulse, bodyB.position, tempA), 
+                Vector.add(bodyA.positionImpulse, 
+                    Vector.sub(bodyB.position, collision.penetration, tempB), tempC), tempD);
 
-            penetration = collision.penetration;
+            pair.separation = Vector.dot(normal, bodyBtoA);
+        }
+        
+        for (i = 0; i < pairs.length; i++) {
+            pair = pairs[i];
 
-            bodyBtoAX = positionImpulseB.x - positionImpulseA.x + penetration.x;
-            bodyBtoAY = positionImpulseB.y - positionImpulseA.y + penetration.y;
-
-            normalX = normal.x;
-            normalY = normal.y;
-
-            separation = normalX * bodyBtoAX + normalY * bodyBtoAY;
-            pair.separation = separation;
-
-            positionImpulse = (separation - pair.slop) * impulseCoefficient;
+            if (!pair.isActive || pair.isSensor)
+                continue;
+            
+            collision = pair.collision;
+            bodyA = collision.parentA;
+            bodyB = collision.parentB;
+            normal = collision.normal;
+            positionImpulse = (pair.separation - pair.slop) * damping;
 
             if (bodyA.isStatic || bodyB.isStatic)
                 positionImpulse *= 2;
             
             if (!(bodyA.isStatic || bodyA.isSleeping)) {
-                contactShare = positionImpulse / bodyA.totalContacts;
-                bodyA.positionImpulse.x += normalX * contactShare;
-                bodyA.positionImpulse.y += normalY * contactShare;
+                contactShare = Resolver._positionDampen / bodyA.totalContacts;
+                bodyA.positionImpulse.x += normal.x * positionImpulse * contactShare;
+                bodyA.positionImpulse.y += normal.y * positionImpulse * contactShare;
             }
 
             if (!(bodyB.isStatic || bodyB.isSleeping)) {
-                contactShare = positionImpulse / bodyB.totalContacts;
-                bodyB.positionImpulse.x -= normalX * contactShare;
-                bodyB.positionImpulse.y -= normalY * contactShare;
+                contactShare = Resolver._positionDampen / bodyB.totalContacts;
+                bodyB.positionImpulse.x -= normal.x * positionImpulse * contactShare;
+                bodyB.positionImpulse.y -= normal.y * positionImpulse * contactShare;
             }
         }
     };
@@ -231,10 +226,12 @@ var Bounds = require('../geometry/Bounds');
      * Find a solution for pair velocities.
      * @method solveVelocity
      * @param {pair[]} pairs
-     * @param {number} timeScale
+     * @param {number} delta
      */
-    Resolver.solveVelocity = function(pairs, timeScale) {
-        var timeScaleSquared = timeScale * timeScale,
+    Resolver.solveVelocity = function(pairs, delta) {
+        var timeScale = delta / Common._timeUnit,
+            timeScale2 = timeScale * timeScale,
+            timeScale3 = timeScale2 * timeScale,
             impulse = Vector._temp[0],
             tempA = Vector._temp[1],
             tempB = Vector._temp[2],
@@ -287,10 +284,10 @@ var Bounds = require('../geometry/Bounds');
                 var tangentImpulse = tangentVelocity,
                     maxFriction = Infinity;
 
-                if (tangentSpeed > pair.friction * pair.frictionStatic * normalForce * timeScaleSquared) {
-                    maxFriction = tangentSpeed;
+                if (tangentSpeed > pair.friction * pair.frictionStatic * normalForce * timeScale3) {
+                    maxFriction = tangentSpeed * timeScale;
                     tangentImpulse = Common.clamp(
-                        pair.friction * tangentVelocityDirection * timeScaleSquared,
+                        pair.friction * tangentVelocityDirection * timeScale3,
                         -maxFriction, maxFriction
                     );
                 }
@@ -304,7 +301,7 @@ var Bounds = require('../geometry/Bounds');
                 tangentImpulse *= share;
 
                 // handle high velocity and resting collisions separately
-                if (normalVelocity < 0 && normalVelocity * normalVelocity > Resolver._restingThresh * timeScaleSquared) {
+                if (normalVelocity < 0 && normalVelocity * normalVelocity > Resolver._restingThresh * timeScale2) {
                     // high normal velocity so clear cached contact normal impulse
                     contact.normalImpulse = 0;
                 } else {
@@ -316,7 +313,7 @@ var Bounds = require('../geometry/Bounds');
                 }
 
                 // handle high velocity and resting collisions separately
-                if (tangentVelocity * tangentVelocity > Resolver._restingThreshTangent * timeScaleSquared) {
+                if (tangentVelocity * tangentVelocity > Resolver._restingThreshTangent * timeScale2) {
                     // high tangent velocity so clear cached contact tangent impulse
                     contact.tangentImpulse = 0;
                 } else {
